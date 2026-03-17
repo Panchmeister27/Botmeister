@@ -3,7 +3,6 @@ import requests
 import os
 import logging
 import time
-import json
 from datetime import datetime
 
 # Set up logging
@@ -23,24 +22,6 @@ SUPPORTED_CURRENCIES = ['USD', 'EUR', 'GBP', 'PLN', 'JPY', 'CHF']
 # Cache for rates and previous day's rates
 rates_cache = None
 last_fetch = 0
-previous_rates = {}
-
-# File to store previous rates (e.g., could be a database in a production environment)
-RATES_FILE = "rates.json"
-
-# Function to load previous rates from a file
-def load_previous_rates():
-    global previous_rates
-    try:
-        with open(RATES_FILE, "r") as f:
-            previous_rates = json.load(f)
-    except FileNotFoundError:
-        previous_rates = {}
-
-# Function to save today's rates
-def save_current_rates(rates):
-    with open(RATES_FILE, "w") as f:
-        json.dump(rates, f)
 
 # Function to get exchange rates with caching
 def get_exchange_rates(base_currency):
@@ -67,16 +48,7 @@ def rates(message):
         text = "💱 *Exchange Rates (BYN base)*\n\n"
         for currency in SUPPORTED_CURRENCIES[1:]:
             text += f"`{currency}`: {r[currency]}\n"
-        # Compare with yesterday's rates
-        if previous_rates:
-            text += "\n📉 *Rate Differences (Compared to Yesterday)*\n"
-            for currency in SUPPORTED_CURRENCIES[1:]:
-                if currency in previous_rates:
-                    diff = r[currency] - previous_rates[currency]
-                    text += f"`{currency}`: {diff:.4f}\n"
         bot.reply_to(message, text, parse_mode='Markdown')
-        # Save today's rates as previous for the next day
-        save_current_rates(r)
     except requests.exceptions.RequestException as e:
         logging.error(f"Request failed: {e}")
         bot.reply_to(message, "Failed to retrieve exchange rates. Please try again later.")
@@ -116,7 +88,12 @@ def convert(message):
 # Command to show help
 @bot.message_handler(commands=['help'])
 def help(message):
-    text = "📖 *Commands*\n\n/rates — Exchange rates (BYN base)\n/convert 100 USD PLN — Convert\n/help — This message"
+    text = "📖 *Commands*\n\n"
+    text += "/rates — Exchange rates (BYN base)\n"
+    text += "/convert 100 USD PLN — Convert between currencies\n"
+    text += "/help — This message\n"
+    text += "/info — Information about the bot\n"
+    text += "/history — See the percentage change in exchange rates from yesterday"
     bot.reply_to(message, text, parse_mode='Markdown')
 
 # Command to show info about the bot
@@ -125,6 +102,38 @@ def info(message):
     text = "ℹ️ *About this Bot*\n\nThis bot provides exchange rates and currency conversion functionality. It uses the [ExchangeRate-API](https://www.exchangerate-api.com) to fetch real-time data and supports several currencies. You can also compare today's exchange rates with yesterday's rates to see any changes."
     bot.reply_to(message, text, parse_mode='Markdown')
 
+# Command to show the percentage change in exchange rates from yesterday
+@bot.message_handler(commands=['history'])
+def history(message):
+    try:
+        today_rates = get_exchange_rates('BYN')
+        
+        # Fetch yesterday's rates (BYN base) - ExchangeRate API has historical data feature
+        yesterday_url = f"https://api.exchangerate-api.com/v4/{(datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')}/BYN"
+        yesterday_data = requests.get(yesterday_url)
+        if yesterday_data.status_code != 200:
+            bot.reply_to(message, "Failed to retrieve yesterday's exchange rates. Please try again later.")
+            return
+
+        yesterday_rates = yesterday_data.json()['rates']
+        
+        # Calculate percentage change
+        text = "📉 *Exchange Rate Changes (Compared to Yesterday)*\n\n"
+        for currency in SUPPORTED_CURRENCIES[1:]:
+            if currency in today_rates and currency in yesterday_rates:
+                today_rate = today_rates[currency]
+                yesterday_rate = yesterday_rates[currency]
+                percent_change = ((today_rate - yesterday_rate) / yesterday_rate) * 100
+                text += f"`{currency}`: {percent_change:.2f}%\n"
+        
+        bot.reply_to(message, text, parse_mode='Markdown')
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request failed: {e}")
+        bot.reply_to(message, "Failed to retrieve exchange rates. Please try again later.")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        bot.reply_to(message, "Something went wrong. Please try again later.")
+
 # Handle non-command messages (users who send something that's not a command)
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def handle_non_command(message):
@@ -132,9 +141,9 @@ def handle_non_command(message):
     text += "/rates — Exchange rates (BYN base)\n"
     text += "/convert 100 USD PLN — Convert between currencies\n"
     text += "/help — Show this message\n"
-    text += "/info — Information about the bot"
+    text += "/info — Information about the bot\n"
+    text += "/history — See the percentage change in exchange rates from yesterday"
     bot.reply_to(message, text, parse_mode='Markdown')
 
 # Polling to keep the bot running
-load_previous_rates()  # Load previous rates on bot startup
 bot.polling()
