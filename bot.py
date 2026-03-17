@@ -125,6 +125,16 @@ def info(message):
     text = "ℹ️ *About this Bot*\n\nThis bot provides exchange rates and currency conversion functionality. It uses the [ExchangeRate-API](https://www.exchangerate-api.com) to fetch real-time data and supports several currencies. You can also compare today's exchange rates with yesterday's rates to see any changes."
     bot.reply_to(message, text, parse_mode='Markdown')
 
+# Handle non-command messages (users who send something that's not a command)
+@bot.message_handler(func=lambda message: not message.text.startswith('/'))
+def handle_non_command(message):
+    text = "❓ I didn't recognize that message. Here are the available commands:\n\n"
+    text += "/rates — Exchange rates (BYN base)\n"
+    text += "/convert 100 USD PLN — Convert between currencies\n"
+    text += "/help — Show this message\n"
+    text += "/info — Information about the bot"
+    bot.reply_to(message, text, parse_mode='Markdown')
+
 # Polling to keep the bot running
 load_previous_rates()  # Load previous rates on bot startup
 bot.polling()
