@@ -4,6 +4,7 @@ import os
 import logging
 import time
 from datetime import datetime, timedelta
+from telebot import types
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +19,10 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # Define supported currencies
 SUPPORTED_CURRENCIES = ['BYN', 'USD', 'EUR', 'GBP', 'PLN', 'JPY', 'CHF']
+MENU_RATES = "Rates"
+MENU_CONVERT = "Convert"
+MENU_HELP = "Help"
+MENU_INFO = "Info"
 
 # Cache for rates
 rates_cache_by_base = {}
@@ -61,10 +66,47 @@ def get_nbrb_rates(ondate=None):
     rates_cache_by_base[cache_key] = {"rates": rates_byn_per_unit, "fetched_at": time.time(), "as_of": as_of}
     return rates_byn_per_unit, as_of
 
+def build_main_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        types.KeyboardButton(MENU_RATES),
+        types.KeyboardButton(MENU_CONVERT),
+        types.KeyboardButton(MENU_HELP),
+        types.KeyboardButton(MENU_INFO),
+    )
+    return kb
+
+def send_convert_usage(message):
+    text = (
+        "Send conversion in this format:\n"
+        "`100 USD PLN`\n\n"
+        f"Supported currencies: {', '.join(SUPPORTED_CURRENCIES)}"
+    )
+    bot.reply_to(message, text, parse_mode='Markdown', reply_markup=build_main_keyboard())
+
+def convert_amount_message(message, amount, from_c, to_c):
+    rates_byn, _ = get_nbrb_rates()
+    if from_c not in rates_byn or to_c not in rates_byn:
+        bot.reply_to(message, "Missing rate for one of the currencies. Please try again later.")
+        return
+
+    # amount * (BYN per 1 FROM) gives BYN; divide by (BYN per 1 TO) to get TO.
+    result = amount * rates_byn[from_c] / rates_byn[to_c]
+    bot.reply_to(
+        message,
+        f"💰 {amount:g} {from_c} = *{result:.2f} {to_c}*",
+        parse_mode='Markdown',
+        reply_markup=build_main_keyboard(),
+    )
+
 # Command to start the bot
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "👋 Welcome! Use /help to see available commands.")
+    bot.reply_to(
+        message,
+        "👋 Welcome! Use the buttons below or type /help.",
+        reply_markup=build_main_keyboard(),
+    )
 
 # Command to get exchange rates to Belarusian Ruble (BYN)
 @bot.message_handler(commands=['rates'])
@@ -103,7 +145,11 @@ def rates(message):
 @bot.message_handler(commands=['convert'])
 def convert(message):
     try:
-        _, amount, from_cur, to_cur = message.text.split()
+        parts = message.text.split()
+        if len(parts) == 1:
+            send_convert_usage(message)
+            return
+        _, amount, from_cur, to_cur = parts
         
         # Validate amount
         try:
@@ -117,20 +163,9 @@ def convert(message):
             bot.reply_to(message, "Invalid currency code. Please check the supported currencies.")
             return
 
-        rates_byn, _ = get_nbrb_rates()
         from_c = from_cur.upper()
         to_c = to_cur.upper()
-        if from_c not in rates_byn or to_c not in rates_byn:
-            bot.reply_to(message, "Missing rate for one of the currencies. Please try again later.")
-            return
-
-        # amount * (BYN per 1 FROM) gives BYN; divide by (BYN per 1 TO) to get TO.
-        result = amount * rates_byn[from_c] / rates_byn[to_c]
-        bot.reply_to(
-            message,
-            f"💰 {amount:g} {from_c} = *{result:.2f} {to_c}*",
-            parse_mode='Markdown',
-        )
+        convert_amount_message(message, amount, from_c, to_c)
     except ValueError:
         bot.reply_to(message, "Usage: `/convert 100 USD PLN`", parse_mode='Markdown')
     except KeyError:
@@ -145,14 +180,47 @@ def convert(message):
 # Command to show help
 @bot.message_handler(commands=['help'])
 def help(message):
-    text = "📖 *Commands*\n\n/rates — Official rates (NBRB, BYN)\n/convert 100 USD PLN — Convert\n/help — This message"
-    bot.reply_to(message, text, parse_mode='Markdown')
+    text = (
+        "📖 *Commands*\n\n"
+        "/rates — Official rates (NBRB, BYN)\n"
+        "/convert 100 USD PLN — Convert\n"
+        "/help — This message\n\n"
+        "You can also use the keyboard buttons."
+    )
+    bot.reply_to(message, text, parse_mode='Markdown', reply_markup=build_main_keyboard())
 
 # Command to show info about the bot
 @bot.message_handler(commands=['info'])
 def info(message):
     text = "ℹ️ *About this Bot*\n\nThis bot provides official exchange rates and currency conversion functionality. It uses the [NBRB ExRates API](https://www.nb-rb.by/apihelp/exrates.htm) to fetch official BYN rates. You can also compare today's rates with calendar-yesterday to see changes."
-    bot.reply_to(message, text, parse_mode='Markdown')
+    bot.reply_to(message, text, parse_mode='Markdown', reply_markup=build_main_keyboard())
+
+@bot.message_handler(func=lambda m: m.text in [MENU_RATES, MENU_CONVERT, MENU_HELP, MENU_INFO])
+def handle_menu_buttons(message):
+    if message.text == MENU_RATES:
+        rates(message)
+    elif message.text == MENU_CONVERT:
+        send_convert_usage(message)
+    elif message.text == MENU_HELP:
+        help(message)
+    elif message.text == MENU_INFO:
+        info(message)
+
+@bot.message_handler(regexp=r'^\s*\d+(?:[.,]\d+)?\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s*$')
+def convert_from_plain_text(message):
+    try:
+        amount_raw, from_cur, to_cur = message.text.replace(",", ".").split()
+        amount = float(amount_raw)
+        from_c = from_cur.upper()
+        to_c = to_cur.upper()
+
+        if from_c not in SUPPORTED_CURRENCIES or to_c not in SUPPORTED_CURRENCIES:
+            bot.reply_to(message, "Invalid currency code. Please check the supported currencies.")
+            return
+
+        convert_amount_message(message, amount, from_c, to_c)
+    except Exception:
+        bot.reply_to(message, "Could not parse conversion request. Example: `100 USD PLN`", parse_mode='Markdown')
 
 # Polling to keep the bot running
 bot.polling()
