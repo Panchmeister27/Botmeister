@@ -23,9 +23,11 @@ MENU_RATES = "Rates"
 MENU_CONVERT = "Convert"
 MENU_HELP = "Help"
 MENU_INFO = "Info"
+MENU_CANCEL = "Cancel"
 
 # Cache for rates
 rates_cache_by_base = {}
+convert_state = {}
 
 # NBRB provides official rates as BYN per Cur_Scale units of currency.
 # We normalize to BYN per 1 unit so conversions and diffs are consistent.
@@ -76,13 +78,28 @@ def build_main_keyboard():
     )
     return kb
 
-def send_convert_usage(message):
-    text = (
-        "Send conversion in this format:\n"
-        "`100 USD PLN`\n\n"
-        f"Supported currencies: {', '.join(SUPPORTED_CURRENCIES)}"
+def build_cancel_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    kb.add(types.KeyboardButton(MENU_CANCEL))
+    return kb
+
+def build_currency_inline_keyboard(prefix, exclude=None):
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
+    for currency in SUPPORTED_CURRENCIES:
+        if currency == exclude:
+            continue
+        buttons.append(types.InlineKeyboardButton(currency, callback_data=f"{prefix}:{currency}"))
+    kb.add(*buttons)
+    return kb
+
+def start_convert_flow(chat_id):
+    convert_state[chat_id] = {"step": "from"}
+    bot.send_message(
+        chat_id,
+        "Choose source currency:",
+        reply_markup=build_currency_inline_keyboard("convert_from"),
     )
-    bot.reply_to(message, text, parse_mode='Markdown', reply_markup=build_main_keyboard())
 
 def convert_amount_message(message, amount, from_c, to_c):
     rates_byn, _ = get_nbrb_rates()
@@ -144,38 +161,7 @@ def rates(message):
 # Command to convert between currencies
 @bot.message_handler(commands=['convert'])
 def convert(message):
-    try:
-        parts = message.text.split()
-        if len(parts) == 1:
-            send_convert_usage(message)
-            return
-        _, amount, from_cur, to_cur = parts
-        
-        # Validate amount
-        try:
-            amount = float(amount)
-        except ValueError:
-            bot.reply_to(message, "Please enter a valid numeric value for the amount.")
-            return
-        
-        # Validate currencies
-        if from_cur.upper() not in SUPPORTED_CURRENCIES or to_cur.upper() not in SUPPORTED_CURRENCIES:
-            bot.reply_to(message, "Invalid currency code. Please check the supported currencies.")
-            return
-
-        from_c = from_cur.upper()
-        to_c = to_cur.upper()
-        convert_amount_message(message, amount, from_c, to_c)
-    except ValueError:
-        bot.reply_to(message, "Usage: `/convert 100 USD PLN`", parse_mode='Markdown')
-    except KeyError:
-        bot.reply_to(message, "Invalid currency code. Please check the codes.")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed: {e}")
-        bot.reply_to(message, "Failed to retrieve exchange rates. Please try again later.")
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-        bot.reply_to(message, "Something went wrong. Please try again later.")
+    start_convert_flow(message.chat.id)
 
 # Command to show help
 @bot.message_handler(commands=['help'])
@@ -183,7 +169,7 @@ def help(message):
     text = (
         "📖 *Commands*\n\n"
         "/rates — Official rates (NBRB, BYN)\n"
-        "/convert 100 USD PLN — Convert\n"
+        "/convert — Step-by-step conversion\n"
         "/help — This message\n\n"
         "You can also use the keyboard buttons."
     )
@@ -200,27 +186,78 @@ def handle_menu_buttons(message):
     if message.text == MENU_RATES:
         rates(message)
     elif message.text == MENU_CONVERT:
-        send_convert_usage(message)
+        start_convert_flow(message.chat.id)
     elif message.text == MENU_HELP:
         help(message)
     elif message.text == MENU_INFO:
         info(message)
 
-@bot.message_handler(regexp=r'^\s*\d+(?:[.,]\d+)?\s+[A-Za-z]{3}\s+[A-Za-z]{3}\s*$')
-def convert_from_plain_text(message):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("convert_from:") or call.data.startswith("convert_to:"))
+def handle_convert_callbacks(call):
+    chat_id = call.message.chat.id
+    state = convert_state.get(chat_id, {})
     try:
-        amount_raw, from_cur, to_cur = message.text.replace(",", ".").split()
-        amount = float(amount_raw)
-        from_c = from_cur.upper()
-        to_c = to_cur.upper()
-
-        if from_c not in SUPPORTED_CURRENCIES or to_c not in SUPPORTED_CURRENCIES:
-            bot.reply_to(message, "Invalid currency code. Please check the supported currencies.")
+        if call.data.startswith("convert_from:"):
+            from_c = call.data.split(":", 1)[1]
+            convert_state[chat_id] = {"step": "to", "from": from_c}
+            bot.answer_callback_query(call.id, f"From: {from_c}")
+            bot.edit_message_text(
+                f"From currency: {from_c}\nNow choose target currency:",
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                reply_markup=build_currency_inline_keyboard("convert_to", exclude=from_c),
+            )
             return
 
-        convert_amount_message(message, amount, from_c, to_c)
+        if call.data.startswith("convert_to:"):
+            to_c = call.data.split(":", 1)[1]
+            from_c = state.get("from")
+            if not from_c:
+                bot.answer_callback_query(call.id, "Please start again with /convert")
+                return
+            convert_state[chat_id] = {"step": "amount", "from": from_c, "to": to_c}
+            bot.answer_callback_query(call.id, f"To: {to_c}")
+            bot.edit_message_text(
+                f"Convert {from_c} -> {to_c}\nSend amount as a number (example: 100):",
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+            )
+            bot.send_message(chat_id, "You can cancel anytime.", reply_markup=build_cancel_keyboard())
     except Exception:
-        bot.reply_to(message, "Could not parse conversion request. Example: `100 USD PLN`", parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "Could not process selection")
+
+@bot.message_handler(func=lambda m: m.chat.id in convert_state and convert_state[m.chat.id].get("step") == "amount")
+def handle_convert_amount_step(message):
+    chat_id = message.chat.id
+    if message.text == MENU_CANCEL:
+        convert_state.pop(chat_id, None)
+        bot.reply_to(message, "Conversion cancelled.", reply_markup=build_main_keyboard())
+        return
+
+    state = convert_state.get(chat_id, {})
+    from_c = state.get("from")
+    to_c = state.get("to")
+    try:
+        amount = float(message.text.replace(",", "."))
+    except ValueError:
+        bot.reply_to(message, "Enter a valid number, e.g. `100`", parse_mode='Markdown', reply_markup=build_cancel_keyboard())
+        return
+
+    if not from_c or not to_c:
+        convert_state.pop(chat_id, None)
+        bot.reply_to(message, "Conversion flow expired. Please tap Convert again.", reply_markup=build_main_keyboard())
+        return
+
+    try:
+        convert_amount_message(message, amount, from_c, to_c)
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request failed: {e}")
+        bot.reply_to(message, "Failed to retrieve exchange rates. Please try again later.", reply_markup=build_main_keyboard())
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+        bot.reply_to(message, "Something went wrong. Please try again later.", reply_markup=build_main_keyboard())
+    finally:
+        convert_state.pop(chat_id, None)
 
 # Polling to keep the bot running
 bot.polling()
